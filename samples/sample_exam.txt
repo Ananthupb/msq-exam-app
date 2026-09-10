@@ -1,0 +1,55 @@
+1. Which of the following are operating systems?
+A. Windows
+B. Linux
+C. Chrome
+D. Ubuntu
+Answer: A, B, D
+Explanation: Windows, Linux, and Ubuntu are operating systems. Google Chrome is a web browser.
+
+2. Which of the following are relational database management systems?
+A. PostgreSQL
+B. MySQL
+C. Redis
+D. Oracle Database
+Answer: A, B, D
+Explanation: PostgreSQL, MySQL, and Oracle are relational (SQL) databases. Redis is an in-memory key-value store.
+
+3. Which of the following are application layer protocols in the OSI / TCP-IP model?
+A. HTTP
+B. FTP
+C. TCP
+D. DNS
+Answer: A, B, D
+Explanation: HTTP, FTP, and DNS operate at the Application Layer (Layer 7). TCP operates at the Transport Layer (Layer 4).
+
+4. Which of the following are network security devices or systems?
+A. Firewall
+B. IDS (Intrusion Detection System)
+C. IPS (Intrusion Prevention System)
+D. Compiler
+Answer: A, B, C
+Explanation: Firewalls, IDS, and IPS are security systems designed to protect networks. A compiler translates programming language source code.
+
+5. Which of the following data structures have O(1) average time complexity for insertion?
+A. Hash Table
+B. Singly Linked List (at head)
+C. Binary Search Tree (unbalanced worst case)
+D. Array List (insertion at arbitrary middle index)
+Answer: A, B
+Explanation: Hash tables average O(1) insertions, and inserting at the head of a linked list is O(1). BST insertions take O(log n) average and O(n) worst-case.
+
+6. Which of the following are symmetric encryption algorithms?
+A. AES (Advanced Encryption Standard)
+B. DES (Data Encryption Standard)
+C. RSA
+D. Blowfish
+Answer: A, B, D
+Explanation: AES, DES, and Blowfish use symmetric keys. RSA is an asymmetric (public-key) cryptosystem.
+
+7. Which of the following are recognized cloud computing service models?
+A. IaaS (Infrastructure as a Service)
+B. PaaS (Platform as a Service)
+C. SaaS (Software as a Service)
+D. CaaS (Compiler as a Service)
+Answer: A, B, C
+Explanation: The NIST cloud model defines IaaS, PaaS, and SaaS as the primary service delivery models.

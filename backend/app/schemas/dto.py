@@ -45,10 +45,22 @@ class ForgotPasswordRequest(BaseModel):
     identifier: str = Field(..., description="Username or Email address")
 
 
-class ResetPasswordRequest(BaseModel):
+class VerifyOtpRequest(BaseModel):
     identifier: str = Field(..., description="Username or Email address")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit OTP code")
+
+
+class VerifyOtpResponse(BaseModel):
+    status: str
+    message: str
+    reset_token: str
+
+
+class ResetPasswordRequest(BaseModel):
+    reset_token: str = Field(..., description="Single-use password reset token")
     new_password: str = Field(..., min_length=6, max_length=100, description="New password")
-    reset_token: Optional[str] = None
+    identifier: Optional[str] = Field(default=None, description="Optional username/email")
+
 
 
 class ChangePasswordRequest(BaseModel):

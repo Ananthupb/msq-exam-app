@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
-import { forgotPassword, resetPassword } from "@/lib/api";
+import { forgotPassword, verifyPasswordOtp, resetPassword } from "@/lib/api";
 import {
   FileText,
   Lock,
@@ -20,6 +20,7 @@ import {
   KeyRound,
   ArrowLeft,
   ArrowRight,
+  RotateCcw,
 } from "lucide-react";
 
 function LoginForm() {
@@ -38,17 +39,26 @@ function LoginForm() {
   const [showPassword, setShowPassword] = useState(false);
 
   // Forgot password state
-  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+  const [forgotStep, setForgotStep] = useState<1 | 2 | 3>(1);
   const [forgotIdentifier, setForgotIdentifier] = useState("");
+  const [forgotOtp, setForgotOtp] = useState("");
   const [forgotToken, setForgotToken] = useState("");
-  const [forgotVerifiedUser, setForgotVerifiedUser] = useState("");
   const [forgotNewPassword, setForgotNewPassword] = useState("");
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
   const [showForgotPass, setShowForgotPass] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Countdown timer for Resend OTP
+  useEffect(() => {
+    if (resendCooldown > 0) {
+      const timer = setTimeout(() => setResendCooldown(resendCooldown - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [resendCooldown]);
 
   // If already logged in, redirect based on role
   useEffect(() => {
@@ -62,6 +72,21 @@ function LoginForm() {
       }
     }
   }, [user, isLoading, redirectUrl, router]);
+
+  const handleResendOtp = async () => {
+    if (resendCooldown > 0 || !forgotIdentifier.trim() || submitting) return;
+    try {
+      setSubmitting(true);
+      setErrorMessage(null);
+      const res = await forgotPassword(forgotIdentifier.trim());
+      setResendCooldown(60);
+      setSuccessMessage(res.message || "A new 6-digit verification code has been sent.");
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to resend verification code.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -112,15 +137,26 @@ function LoginForm() {
       } else if (mode === "forgot") {
         if (forgotStep === 1) {
           if (!forgotIdentifier.trim()) {
-            setErrorMessage("Please enter your username or email.");
+            setErrorMessage("Please enter your username or registered email.");
             setSubmitting(false);
             return;
           }
           const res = await forgotPassword(forgotIdentifier.trim());
-          setForgotToken(res.reset_token || "");
-          setForgotVerifiedUser(res.username || forgotIdentifier.trim());
           setForgotStep(2);
-          setSuccessMessage(res.message || "Account verified! Please create your new password.");
+          setResendCooldown(60);
+          setForgotOtp("");
+          setSuccessMessage(res.message || "A 6-digit verification code has been sent.");
+        } else if (forgotStep === 2) {
+          const cleanOtp = forgotOtp.trim();
+          if (!cleanOtp || cleanOtp.length !== 6) {
+            setErrorMessage("Please enter the complete 6-digit verification code.");
+            setSubmitting(false);
+            return;
+          }
+          const res = await verifyPasswordOtp(forgotIdentifier.trim(), cleanOtp);
+          setForgotToken(res.reset_token);
+          setForgotStep(3);
+          setSuccessMessage(res.message || "Code verified successfully! Now create your new password.");
         } else {
           if (!forgotNewPassword || forgotNewPassword.length < 6) {
             setErrorMessage("Password must be at least 6 characters.");
@@ -133,9 +169,8 @@ function LoginForm() {
             return;
           }
           const res = await resetPassword({
-            identifier: forgotIdentifier.trim(),
+            reset_token: forgotToken,
             new_password: forgotNewPassword,
-            reset_token: forgotToken || undefined,
           });
           setSuccessMessage(
             res.message || "Password updated successfully! Please sign in with your new password."
@@ -145,6 +180,8 @@ function LoginForm() {
           setMode("login");
           setForgotStep(1);
           setForgotIdentifier("");
+          setForgotOtp("");
+          setForgotToken("");
           setForgotNewPassword("");
           setForgotConfirmPassword("");
         }
@@ -173,7 +210,11 @@ function LoginForm() {
               ? "Sign in to your account"
               : mode === "register"
               ? "Create a new account"
-              : "Reset your password"}
+              : forgotStep === 1
+              ? "Reset your password"
+              : forgotStep === 2
+              ? "Enter Verification Code"
+              : "Create New Password"}
           </h2>
           <p className="mt-2 text-xs sm:text-sm text-slate-500 dark:text-slate-400">
             {mode === "login"
@@ -181,8 +222,10 @@ function LoginForm() {
               : mode === "register"
               ? "Register to practice and track your MSQ exam attempts"
               : forgotStep === 1
-              ? "Verify your account identifier to reset your password"
-              : `Setting new password for ${forgotVerifiedUser}`}
+              ? "Enter your username or registered email to receive a 6-digit verification code"
+              : forgotStep === 2
+              ? `A 6-digit verification code has been sent for ${forgotIdentifier}`
+              : `Create a strong new password for ${forgotIdentifier}`}
           </p>
         </div>
 
@@ -227,6 +270,8 @@ function LoginForm() {
               onClick={() => {
                 setMode("login");
                 setForgotStep(1);
+                setForgotOtp("");
+                setForgotToken("");
                 setErrorMessage(null);
                 setSuccessMessage(null);
               }}
@@ -234,9 +279,25 @@ function LoginForm() {
             >
               <ArrowLeft className="h-3.5 w-3.5" /> Back to Sign In
             </button>
-            <span className="text-xs font-semibold text-slate-400">
-              Step {forgotStep} of 2
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-semibold text-slate-400">
+                Step {forgotStep} of 3
+              </span>
+              <div className="flex gap-1">
+                {[1, 2, 3].map((s) => (
+                  <span
+                    key={s}
+                    className={`h-1.5 w-3 rounded-full transition-colors ${
+                      s === forgotStep
+                        ? "bg-blue-600"
+                        : s < forgotStep
+                        ? "bg-emerald-500"
+                        : "bg-slate-200 dark:bg-slate-700"
+                    }`}
+                  />
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
@@ -322,7 +383,7 @@ function LoginForm() {
               forgotStep === 1 ? (
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Enter Username or Email
+                    Enter Username or Registered Email
                   </label>
                   <div className="relative">
                     <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
@@ -337,9 +398,60 @@ function LoginForm() {
                       className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-3 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
                     />
                   </div>
-                  <p className="mt-1.5 text-[11px] text-slate-500">
-                    We will verify your account and allow you to set a new password.
+                  <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
+                    We will send a secure 6-digit verification code to your registered email address.
                   </p>
+                </div>
+              ) : forgotStep === 2 ? (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Enter 6-Digit Verification Code
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={6}
+                        required
+                        autoFocus
+                        value={forgotOtp}
+                        onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ""))}
+                        placeholder="••••••"
+                        className="w-full rounded-xl border border-slate-300 bg-slate-50 py-3 text-center text-2xl font-bold tracking-[0.4em] font-mono text-slate-900 placeholder:text-slate-300 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Resend OTP row */}
+                  <div className="flex items-center justify-between text-xs pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setForgotStep(1);
+                        setForgotOtp("");
+                        setErrorMessage(null);
+                      }}
+                      className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      Change Username / Email
+                    </button>
+
+                    {resendCooldown > 0 ? (
+                      <span className="text-slate-400 font-medium">
+                        Resend code in {resendCooldown}s
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleResendOtp}
+                        className="inline-flex items-center gap-1 font-bold text-blue-600 hover:text-blue-700 dark:text-blue-400 hover:underline cursor-pointer"
+                      >
+                        <RotateCcw className="h-3 w-3" /> Resend Code
+                      </button>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <>
@@ -445,6 +557,8 @@ function LoginForm() {
                     setMode("forgot");
                     setForgotStep(1);
                     setForgotIdentifier(identifier);
+                    setForgotOtp("");
+                    setForgotToken("");
                     setErrorMessage(null);
                     setSuccessMessage(null);
                   }}
@@ -474,8 +588,13 @@ function LoginForm() {
                 </>
               ) : forgotStep === 1 ? (
                 <>
-                  <span>Continue</span>
+                  <span>Send Verification Code</span>
                   <ArrowRight className="h-4 w-4" />
+                </>
+              ) : forgotStep === 2 ? (
+                <>
+                  <CheckCircle2 className="h-4 w-4" />
+                  Verify Code
                 </>
               ) : (
                 <>

@@ -155,11 +155,15 @@ def test_admin_reset_user_password():
     assert "access_token" in login_res.json()
 
 
-def test_forgot_password_and_reset_flow():
+def test_forgot_password_and_reset_flow(monkeypatch):
     """
-    Verifies the offline-friendly Forgot Password & Reset Password workflow.
+    Verifies the secure 6-Digit Email OTP Forgot Password & Reset Password workflow.
     """
     user, _ = make_test_user("forgot_user", role="user")
+
+    # Mock secrets.randbelow to generate predictable OTP "123456"
+    import secrets
+    monkeypatch.setattr(secrets, "randbelow", lambda _: 23456)  # 23456 + 100000 = 123456
 
     # 1. Request forgot password with username
     res_forgot = client.post(
@@ -168,14 +172,34 @@ def test_forgot_password_and_reset_flow():
     )
     assert res_forgot.status_code == 200
     forgot_data = res_forgot.json()
-    assert "reset_token" in forgot_data
-    reset_token = forgot_data["reset_token"]
 
-    # 2. Reset password using the reset token
+    # CRITICAL: Verify ZERO leakage of reset_token or raw OTP in the client response
+    assert "reset_token" not in forgot_data
+    assert "otp" not in forgot_data
+    assert "verification code has been sent" in forgot_data["message"]
+
+    # 2. Test invalid OTP verification -> 400 Bad Request
+    res_invalid_otp = client.post(
+        "/api/auth/verify-otp",
+        json={"identifier": user.username, "otp": "999999"}
+    )
+    assert res_invalid_otp.status_code == 400
+    assert "Invalid verification code" in res_invalid_otp.json()["detail"]
+
+    # 3. Verify with correct OTP -> 200 OK and receives reset_token
+    res_valid_otp = client.post(
+        "/api/auth/verify-otp",
+        json={"identifier": user.username, "otp": "123456"}
+    )
+    assert res_valid_otp.status_code == 200
+    otp_data = res_valid_otp.json()
+    assert "reset_token" in otp_data
+    reset_token = otp_data["reset_token"]
+
+    # 4. Reset password using the verified reset token
     res_reset = client.post(
         "/api/auth/reset-password",
         json={
-            "identifier": user.username,
             "new_password": "ResetPassword456!",
             "reset_token": reset_token
         }
@@ -183,13 +207,14 @@ def test_forgot_password_and_reset_flow():
     assert res_reset.status_code == 200
     assert "successfully reset" in res_reset.json()["message"]
 
-    # 3. Verify user can now log in with the new password
+    # 5. Verify user can now log in with the new password
     login_res = client.post(
         "/api/auth/login",
         json={"identifier": user.email, "password": "ResetPassword456!"}
     )
     assert login_res.status_code == 200
     assert "access_token" in login_res.json()
+
 
 
 def test_profile_update_and_change_password():

@@ -16,6 +16,7 @@ import {
   BulkDeleteResponse,
   UserProfileStats,
   ForgotPasswordResponse,
+  VerifyOtpResponse,
 } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -129,16 +130,27 @@ export async function forgotPassword(identifier: string): Promise<ForgotPassword
   });
 }
 
+export async function verifyPasswordOtp(
+  identifier: string,
+  otp: string
+): Promise<VerifyOtpResponse> {
+  return fetchJSON<VerifyOtpResponse>("/api/auth/verify-otp", {
+    method: "POST",
+    body: JSON.stringify({ identifier, otp }),
+  });
+}
+
 export async function resetPassword(payload: {
-  identifier: string;
+  reset_token: string;
   new_password: string;
-  reset_token?: string;
+  identifier?: string;
 }): Promise<{ status: string; message: string }> {
   return fetchJSON<{ status: string; message: string }>("/api/auth/reset-password", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
+
 
 export async function changePassword(payload: {
   current_password: string;

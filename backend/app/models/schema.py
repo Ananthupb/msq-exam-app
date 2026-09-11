@@ -32,6 +32,8 @@ class User(Base):
     attempts = relationship("ExamAttempt", back_populates="user", cascade="all, delete-orphan")
     questions = relationship("Question", back_populates="owner", cascade="all, delete-orphan")
     exams = relationship("Exam", back_populates="owner", cascade="all, delete-orphan")
+    password_reset_otps = relationship("PasswordResetOTP", back_populates="user", cascade="all, delete-orphan")
+
 
 
 class Question(Base):
@@ -123,3 +125,18 @@ class ExamAttempt(Base):
 
     user = relationship("User", back_populates="attempts")
     exam = relationship("Exam", back_populates="attempts")
+
+
+class PasswordResetOTP(Base):
+    __tablename__ = "password_reset_otps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    otp_hash = Column(String(255), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    is_used = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+    user = relationship("User", back_populates="password_reset_otps")
+

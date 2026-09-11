@@ -1,4 +1,6 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+import secrets
+import hashlib
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -6,13 +8,15 @@ from sqlalchemy import func
 import jwt
 
 from ..database.session import get_db
-from ..models.schema import User, ExamAttempt
+from ..models.schema import User, ExamAttempt, PasswordResetOTP
 from ..schemas.dto import (
     UserRegister,
     UserLogin,
     UserResponse,
     TokenResponse,
     ForgotPasswordRequest,
+    VerifyOtpRequest,
+    VerifyOtpResponse,
     ResetPasswordRequest,
     ChangePasswordRequest,
     UpdateProfileRequest,
@@ -20,6 +24,7 @@ from ..schemas.dto import (
 )
 from ..core.security import hash_password, verify_password, create_access_token, JWT_SECRET, JWT_ALGORITHM
 from ..core.deps import get_current_user
+from ..services.email_service import send_otp_email
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
@@ -121,8 +126,8 @@ def logout_user(current_user: User = Depends(get_current_user)):
 @router.post("/forgot-password")
 def forgot_password_request(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
     """
-    Initiates password recovery by verifying user exists and providing a temporary reset token.
-    Works seamlessly offline without requiring paid third-party SMTP services.
+    Initiates password recovery by sending a 6-digit OTP to the registered user's email.
+    Never exposes reset tokens or OTP in the client response.
     """
     ident = payload.identifier.strip().lower()
     user = db.query(User).filter(
@@ -141,46 +146,160 @@ def forgot_password_request(payload: ForgotPasswordRequest, db: Session = Depend
             detail="Account has been disabled. Please contact an administrator."
         )
 
-    # Issue 15-minute reset token
+    # Invalidate previous unused OTPs for this user
+    db.query(PasswordResetOTP).filter(
+        PasswordResetOTP.user_id == user.id,
+        PasswordResetOTP.is_used == False
+    ).update({"is_used": True})
+
+    # Generate 6-digit cryptographically secure numeric OTP
+    otp_code = f"{secrets.randbelow(900000) + 100000}"
+    otp_hash = hashlib.sha256(otp_code.encode()).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    otp_record = PasswordResetOTP(
+        user_id=user.id,
+        otp_hash=otp_hash,
+        expires_at=expires_at,
+        attempts=0,
+        is_used=False
+    )
+    db.add(otp_record)
+    db.commit()
+
+    # Dispatch email (or fallback to server console if SMTP not configured)
+    send_otp_email(to_email=user.email, username=user.username, otp_code=otp_code)
+
+    # Mask email address for user privacy (e.g., a***u@gmail.com)
+    email_parts = user.email.split("@")
+    if len(email_parts) == 2:
+        name_part, domain_part = email_parts
+        if len(name_part) <= 2:
+            masked_name = name_part[0] + "***"
+        else:
+            masked_name = name_part[0] + "***" + name_part[-1]
+        masked_email = f"{masked_name}@{domain_part}"
+    else:
+        masked_email = user.email
+
+    return {
+        "status": "success",
+        "message": f"A 6-digit verification code has been sent to {masked_email}.",
+        "identifier": user.username
+    }
+
+
+@router.post("/verify-otp", response_model=VerifyOtpResponse)
+def verify_password_otp(payload: VerifyOtpRequest, db: Session = Depends(get_db)):
+    """
+    Verifies the 6-digit OTP. On success, issues a single-use 10-minute JWT reset token.
+    Enforces maximum 5 attempts to prevent brute-force attacks.
+    """
+    ident = payload.identifier.strip().lower()
+    user = db.query(User).filter(
+        (User.username.ilike(ident)) | (User.email.ilike(ident))
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account found with that username or email address."
+        )
+
+    now = datetime.now(timezone.utc)
+    otp_record = db.query(PasswordResetOTP).filter(
+        PasswordResetOTP.user_id == user.id,
+        PasswordResetOTP.is_used == False
+    ).order_by(PasswordResetOTP.created_at.desc()).first()
+
+    if not otp_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active password reset request found. Please request a new code."
+        )
+
+    exp = otp_record.expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+
+    if exp < now:
+        otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code has expired. Please request a new code."
+        )
+
+    if otp_record.attempts >= 5:
+        otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many incorrect attempts. This code has been invalidated for security. Please request a new code."
+        )
+
+    input_hash = hashlib.sha256(payload.otp.strip().encode()).hexdigest()
+    if input_hash != otp_record.otp_hash:
+        otp_record.attempts += 1
+        db.commit()
+        remaining = 5 - otp_record.attempts
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid verification code. {remaining} attempt(s) remaining."
+        )
+
+    # Valid OTP! Mark as used so it cannot be used again
+    otp_record.is_used = True
+    db.commit()
+
+    # Issue 10-minute JWT reset token with scope 'password_reset'
     reset_token = create_access_token(
         {"sub": str(user.id), "scope": "password_reset", "username": user.username},
-        expires_delta=timedelta(minutes=15)
+        expires_delta=timedelta(minutes=10)
     )
 
     return {
         "status": "success",
-        "message": f"Account verified for {user.username}. You may now reset your password.",
-        "reset_token": reset_token,
-        "username": user.username,
-        "email": user.email
+        "message": "Verification code verified successfully. You may now set a new password.",
+        "reset_token": reset_token
     }
 
 
 @router.post("/reset-password")
 def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
     """
-    Resets the user's password using either the reset token or verified identifier.
+    Resets the user's password using the verified single-use reset token.
     """
-    target_user: Optional[User] = None
+    if not payload.reset_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid reset token is required. Please verify your email OTP first."
+        )
 
-    if payload.reset_token:
-        try:
-            decoded = jwt.decode(payload.reset_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-            user_id = int(decoded.get("sub"))
-            target_user = db.query(User).filter(User.id == user_id).first()
-        except Exception:
-            pass
-
-    if not target_user:
-        ident = payload.identifier.strip().lower()
-        target_user = db.query(User).filter(
-            (User.username.ilike(ident)) | (User.email.ilike(ident))
-        ).first()
+    try:
+        decoded = jwt.decode(payload.reset_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if decoded.get("scope") != "password_reset":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token scope for password reset."
+            )
+        user_id = int(decoded.get("sub"))
+        target_user = db.query(User).filter(User.id == user_id).first()
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password reset session has expired. Please request a new code."
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired reset token. Please request a new code."
+        )
 
     if not target_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User account not found or reset session expired."
+            detail="User account not found."
         )
 
     new_pwd = payload.new_password.strip()
@@ -197,6 +316,7 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
         "status": "success",
         "message": f"Password for {target_user.username} has been successfully reset. You can now sign in with your new password."
     }
+
 
 
 @router.put("/change-password")

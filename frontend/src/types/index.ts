@@ -184,9 +184,14 @@ export interface UserProfileStats {
 export interface ForgotPasswordResponse {
   status: string;
   message: string;
-  reset_token?: string;
-  username?: string;
-  email?: string;
+  identifier?: string;
 }
+
+export interface VerifyOtpResponse {
+  status: string;
+  message: string;
+  reset_token: string;
+}
+
 
 

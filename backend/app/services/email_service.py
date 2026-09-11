@@ -3,15 +3,9 @@ import smtplib
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
-
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "") or SMTP_USER
-SMTP_TLS = os.getenv("SMTP_TLS", "true").lower() in ("1", "true", "yes")
 
 
 def send_otp_email(to_email: str, username: str, otp_code: str) -> bool:
@@ -19,6 +13,14 @@ def send_otp_email(to_email: str, username: str, otp_code: str) -> bool:
     Sends a 6-digit OTP to the user's email address.
     If SMTP credentials are not configured, logs the OTP safely to the console.
     """
+    load_dotenv(override=False)
+
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
+    smtp_from_email = os.getenv("SMTP_FROM_EMAIL", "").strip() or smtp_user
+    smtp_tls = os.getenv("SMTP_TLS", "true").lower() in ("1", "true", "yes")
     subject = f"{otp_code} is your MSQ Exam App password reset code"
 
     text_content = f"""Hello {username},
@@ -62,13 +64,13 @@ This code will expire in 10 minutes. If you did not request this, please ignore 
 </body>
 </html>"""
 
-    has_smtp = bool(SMTP_USER and SMTP_PASSWORD)
+    has_smtp = bool(smtp_user and smtp_password)
 
     if has_smtp:
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
-            msg["From"] = f"MSQ Exam App <{SMTP_FROM_EMAIL}>"
+            msg["From"] = f"MSQ Exam App <{smtp_from_email}>"
             msg["To"] = to_email
 
             part1 = MIMEText(text_content, "plain")
@@ -76,16 +78,17 @@ This code will expire in 10 minutes. If you did not request this, please ignore 
             msg.attach(part1)
             msg.attach(part2)
 
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-                if SMTP_TLS:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                if smtp_tls:
                     server.starttls()
-                server.login(SMTP_USER, SMTP_PASSWORD)
-                server.sendmail(SMTP_FROM_EMAIL, [to_email], msg.as_string())
+                server.login(smtp_user, smtp_password)
+                server.sendmail(smtp_from_email, [to_email], msg.as_string())
 
             logger.info(f"Successfully sent password reset OTP email to {to_email}")
             return True
         except Exception as e:
             logger.error(f"Failed to send OTP email via SMTP: {e}")
+            print(f"\n[SMTP ERROR] Could not deliver email via {smtp_host}:{smtp_port} -> {e}")
             # Fall back to console print
 
     # Fallback to local console log

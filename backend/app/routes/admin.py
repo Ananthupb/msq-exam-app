@@ -9,9 +9,11 @@ from ..schemas.dto import (
     AdminStatsResponse,
     AdminUserListItem,
     UserUpdate,
+    AdminResetPasswordRequest,
     ExamAttemptResponse,
 )
 from ..core.deps import require_admin
+from ..core.security import hash_password
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"], dependencies=[Depends(require_admin)])
 
@@ -94,6 +96,29 @@ def update_user_status(
     db.commit()
     db.refresh(user)
     return {"status": "success", "message": f"User {user.username} updated."}
+
+
+@router.put("/users/{user_id}/password")
+def reset_user_password_admin(
+    user_id: int,
+    payload: AdminResetPasswordRequest,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Administrator endpoint to change/reset any user's password directly.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    pwd = payload.new_password.strip()
+    if len(pwd) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
+
+    user.password_hash = hash_password(pwd)
+    db.commit()
+    return {"status": "success", "message": f"Password for user '{user.username}' has been successfully changed."}
 
 
 @router.delete("/users/{user_id}")

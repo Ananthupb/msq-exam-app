@@ -175,3 +175,18 @@ export interface BulkDeleteResponse {
   message: string;
 }
 
+export interface UserProfileStats {
+  total_attempts: number;
+  completed_attempts: number;
+  average_score: number;
+}
+
+export interface ForgotPasswordResponse {
+  status: string;
+  message: string;
+  reset_token?: string;
+  username?: string;
+  email?: string;
+}
+
+

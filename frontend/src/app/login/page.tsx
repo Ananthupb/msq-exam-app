@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+import { forgotPassword, resetPassword } from "@/lib/api";
 import {
   FileText,
   Lock,
@@ -16,6 +17,9 @@ import {
   AlertCircle,
   CheckCircle2,
   ShieldCheck,
+  KeyRound,
+  ArrowLeft,
+  ArrowRight,
 } from "lucide-react";
 
 function LoginForm() {
@@ -25,13 +29,22 @@ function LoginForm() {
 
   const { user, login, register, isLoading } = useAuth();
 
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "forgot">("login");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
+
+  // Forgot password state
+  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+  const [forgotIdentifier, setForgotIdentifier] = useState("");
+  const [forgotToken, setForgotToken] = useState("");
+  const [forgotVerifiedUser, setForgotVerifiedUser] = useState("");
+  const [forgotNewPassword, setForgotNewPassword] = useState("");
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
+  const [showForgotPass, setShowForgotPass] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -74,7 +87,7 @@ function LoginForm() {
             router.push("/dashboard");
           }
         }, 500);
-      } else {
+      } else if (mode === "register") {
         if (!username.trim() || !email.trim() || !password) {
           setErrorMessage("Please complete all required fields.");
           setSubmitting(false);
@@ -96,6 +109,45 @@ function LoginForm() {
             router.push("/dashboard");
           }
         }, 600);
+      } else if (mode === "forgot") {
+        if (forgotStep === 1) {
+          if (!forgotIdentifier.trim()) {
+            setErrorMessage("Please enter your username or email.");
+            setSubmitting(false);
+            return;
+          }
+          const res = await forgotPassword(forgotIdentifier.trim());
+          setForgotToken(res.reset_token || "");
+          setForgotVerifiedUser(res.username || forgotIdentifier.trim());
+          setForgotStep(2);
+          setSuccessMessage(res.message || "Account verified! Please create your new password.");
+        } else {
+          if (!forgotNewPassword || forgotNewPassword.length < 6) {
+            setErrorMessage("Password must be at least 6 characters.");
+            setSubmitting(false);
+            return;
+          }
+          if (forgotNewPassword !== forgotConfirmPassword) {
+            setErrorMessage("Passwords do not match.");
+            setSubmitting(false);
+            return;
+          }
+          const res = await resetPassword({
+            identifier: forgotIdentifier.trim(),
+            new_password: forgotNewPassword,
+            reset_token: forgotToken || undefined,
+          });
+          setSuccessMessage(
+            res.message || "Password updated successfully! Please sign in with your new password."
+          );
+          setIdentifier(forgotIdentifier.trim());
+          setPassword("");
+          setMode("login");
+          setForgotStep(1);
+          setForgotIdentifier("");
+          setForgotNewPassword("");
+          setForgotConfirmPassword("");
+        }
       }
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -114,51 +166,79 @@ function LoginForm() {
         {/* Header */}
         <div className="text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-500/30">
-            <FileText className="h-8 w-8" />
+            {mode === "forgot" ? <KeyRound className="h-7 w-7" /> : <FileText className="h-8 w-8" />}
           </div>
           <h2 className="mt-4 text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 dark:text-white">
-            {mode === "login" ? "Sign in to your account" : "Create a new account"}
+            {mode === "login"
+              ? "Sign in to your account"
+              : mode === "register"
+              ? "Create a new account"
+              : "Reset your password"}
           </h2>
           <p className="mt-2 text-xs sm:text-sm text-slate-500 dark:text-slate-400">
             {mode === "login"
               ? "Access Multiple Select Questions practice exams and results"
-              : "Register to practice and track your MSQ exam attempts"}
+              : mode === "register"
+              ? "Register to practice and track your MSQ exam attempts"
+              : forgotStep === 1
+              ? "Verify your account identifier to reset your password"
+              : `Setting new password for ${forgotVerifiedUser}`}
           </p>
         </div>
 
-        {/* Tab switch */}
-        <div className="flex rounded-xl bg-slate-200/80 p-1 dark:bg-slate-800">
-          <button
-            type="button"
-            onClick={() => {
-              setMode("login");
-              setErrorMessage(null);
-              setSuccessMessage(null);
-            }}
-            className={`flex-1 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all ${
-              mode === "login"
-                ? "bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
-            }`}
-          >
-            Sign In
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("register");
-              setErrorMessage(null);
-              setSuccessMessage(null);
-            }}
-            className={`flex-1 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all ${
-              mode === "register"
-                ? "bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
-            }`}
-          >
-            Register
-          </button>
-        </div>
+        {/* Tab switch (only if not in forgot mode) */}
+        {mode !== "forgot" ? (
+          <div className="flex rounded-xl bg-slate-200/80 p-1 dark:bg-slate-800">
+            <button
+              type="button"
+              onClick={() => {
+                setMode("login");
+                setErrorMessage(null);
+                setSuccessMessage(null);
+              }}
+              className={`flex-1 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer ${
+                mode === "login"
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode("register");
+                setErrorMessage(null);
+                setSuccessMessage(null);
+              }}
+              className={`flex-1 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer ${
+                mode === "register"
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
+              }`}
+            >
+              Register
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between px-1">
+            <button
+              type="button"
+              onClick={() => {
+                setMode("login");
+                setForgotStep(1);
+                setErrorMessage(null);
+                setSuccessMessage(null);
+              }}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" /> Back to Sign In
+            </button>
+            <span className="text-xs font-semibold text-slate-400">
+              Step {forgotStep} of 2
+            </span>
+          </div>
+        )}
 
         {/* Alert Notifications */}
         {errorMessage && (
@@ -197,7 +277,7 @@ function LoginForm() {
                   />
                 </div>
               </div>
-            ) : (
+            ) : mode === "register" ? (
               <>
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
@@ -237,38 +317,114 @@ function LoginForm() {
                   </div>
                 </div>
               </>
+            ) : (
+              /* Forgot password mode */
+              forgotStep === 1 ? (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Enter Username or Email
+                  </label>
+                  <div className="relative">
+                    <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                      <UserIcon className="h-4 w-4" />
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      value={forgotIdentifier}
+                      onChange={(e) => setForgotIdentifier(e.target.value)}
+                      placeholder="e.g. yourname or yourmail@gmail.com"
+                      className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-3 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
+                    />
+                  </div>
+                  <p className="mt-1.5 text-[11px] text-slate-500">
+                    We will verify your account and allow you to set a new password.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      New Password (min 6 characters)
+                    </label>
+                    <div className="relative">
+                      <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                        <Lock className="h-4 w-4" />
+                      </div>
+                      <input
+                        type={showForgotPass ? "text" : "password"}
+                        required
+                        value={forgotNewPassword}
+                        onChange={(e) => setForgotNewPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-10 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowForgotPass(!showForgotPass)}
+                        className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                        tabIndex={-1}
+                      >
+                        {showForgotPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Confirm New Password
+                    </label>
+                    <div className="relative">
+                      <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                        <Lock className="h-4 w-4" />
+                      </div>
+                      <input
+                        type={showForgotPass ? "text" : "password"}
+                        required
+                        value={forgotConfirmPassword}
+                        onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-10 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
+                      />
+                    </div>
+                  </div>
+                </>
+              )
             )}
 
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                Password
-              </label>
-              <div className="relative">
-                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
-                  <Lock className="h-4 w-4" />
+            {/* Password field for login & register modes */}
+            {mode !== "forgot" && (
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Password
+                </label>
+                <div className="relative">
+                  <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                    <Lock className="h-4 w-4" />
+                  </div>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-10 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                    tabIndex={-1}
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-10 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 dark:focus:border-blue-500 dark:focus:bg-slate-950 dark:focus:text-white transition-colors"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                  tabIndex={-1}
-                >
-                  {showPassword ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </button>
               </div>
-            </div>
+            )}
 
             {mode === "login" && (
               <div className="flex items-center justify-between pt-1">
@@ -283,9 +439,19 @@ function LoginForm() {
                     Remember me (30 days)
                   </span>
                 </label>
-                <span className="text-xs text-slate-400">
-                  Secure JWT Session
-                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("forgot");
+                    setForgotStep(1);
+                    setForgotIdentifier(identifier);
+                    setErrorMessage(null);
+                    setSuccessMessage(null);
+                  }}
+                  className="text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 hover:underline cursor-pointer"
+                >
+                  Forgot password?
+                </button>
               </div>
             )}
 
@@ -301,16 +467,26 @@ function LoginForm() {
                   <LogIn className="h-4 w-4" />
                   Sign In
                 </>
-              ) : (
+              ) : mode === "register" ? (
                 <>
                   <UserPlus className="h-4 w-4" />
                   Create Account
+                </>
+              ) : forgotStep === 1 ? (
+                <>
+                  <span>Continue</span>
+                  <ArrowRight className="h-4 w-4" />
+                </>
+              ) : (
+                <>
+                  <KeyRound className="h-4 w-4" />
+                  Reset Password
                 </>
               )}
             </button>
           </form>
 
-          {/* Admin Notice */}
+          {/* Role-based Notice */}
           <div className="mt-6 border-t border-slate-100 pt-4 dark:border-slate-800 text-center">
             <div className="flex items-center justify-center gap-1.5 text-xs text-slate-400">
               <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />

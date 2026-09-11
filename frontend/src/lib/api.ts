@@ -14,6 +14,8 @@ import {
   AdminStats,
   AdminUserListItem,
   BulkDeleteResponse,
+  UserProfileStats,
+  ForgotPasswordResponse,
 } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -119,6 +121,49 @@ export async function logoutUser(): Promise<void> {
     clearAuthToken();
   }
 }
+
+export async function forgotPassword(identifier: string): Promise<ForgotPasswordResponse> {
+  return fetchJSON<ForgotPasswordResponse>("/api/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ identifier }),
+  });
+}
+
+export async function resetPassword(payload: {
+  identifier: string;
+  new_password: string;
+  reset_token?: string;
+}): Promise<{ status: string; message: string }> {
+  return fetchJSON<{ status: string; message: string }>("/api/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function changePassword(payload: {
+  current_password: string;
+  new_password: string;
+}): Promise<{ status: string; message: string }> {
+  return fetchJSON<{ status: string; message: string }>("/api/auth/change-password", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUserProfile(payload: {
+  username?: string;
+  email?: string;
+}): Promise<User> {
+  return fetchJSON<User>("/api/auth/profile", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getUserProfileStats(): Promise<UserProfileStats> {
+  return fetchJSON<UserProfileStats>("/api/auth/profile/stats");
+}
+
 
 // --- Document Upload ---
 export async function uploadDocument(file: File): Promise<UploadResponse> {
@@ -336,6 +381,17 @@ export async function deleteAdminUser(userId: number): Promise<{ status: string;
   });
 }
 
+export async function adminResetUserPassword(
+  userId: number,
+  newPassword: string
+): Promise<{ status: string; message: string }> {
+  return fetchJSON<{ status: string; message: string }>(`/api/admin/users/${userId}/password`, {
+    method: "PUT",
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+}
+
 export async function getAdminAttempts(): Promise<ExamAttempt[]> {
   return fetchJSON<ExamAttempt[]>("/api/admin/attempts");
 }
+

@@ -37,6 +37,36 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=6, max_length=100, description="New password for the user")
+
+
+class ForgotPasswordRequest(BaseModel):
+    identifier: str = Field(..., description="Username or Email address")
+
+
+class ResetPasswordRequest(BaseModel):
+    identifier: str = Field(..., description="Username or Email address")
+    new_password: str = Field(..., min_length=6, max_length=100, description="New password")
+    reset_token: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., description="Current password")
+    new_password: str = Field(..., min_length=6, max_length=100, description="New password")
+
+
+class UpdateProfileRequest(BaseModel):
+    username: Optional[str] = Field(default=None, min_length=3, max_length=50)
+    email: Optional[str] = Field(default=None, min_length=5, max_length=255)
+
+
+class UserProfileStatsResponse(BaseModel):
+    total_attempts: int
+    completed_attempts: int
+    average_score: float
+
+
 class AdminUserListItem(UserResponse):
     total_attempts: int = 0
 

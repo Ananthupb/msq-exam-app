@@ -116,3 +116,130 @@ def test_bulk_delete_and_ownership():
     )
     assert del_all_res.status_code == 200
     assert len(client.get("/api/questions").json()) == 0
+
+
+def test_admin_reset_user_password():
+    """
+    Verifies that an admin can reset any user's password directly,
+    while non-admins are forbidden.
+    """
+    admin_user, admin_token = make_test_user("pw_admin", role="admin")
+    student, student_token = make_test_user("pw_student", role="user")
+
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    student_headers = {"Authorization": f"Bearer {student_token}"}
+
+    # 1. Non-admin attempts to reset password -> 403 Forbidden
+    res_forbidden = client.put(
+        f"/api/admin/users/{student.id}/password",
+        json={"new_password": "NewSecretPassword123!"},
+        headers=student_headers
+    )
+    assert res_forbidden.status_code == 403
+
+    # 2. Admin resets student password
+    res_reset = client.put(
+        f"/api/admin/users/{student.id}/password",
+        json={"new_password": "NewSecretPassword123!"},
+        headers=admin_headers
+    )
+    assert res_reset.status_code == 200
+    assert "successfully changed" in res_reset.json()["message"]
+
+    # 3. Student logs in with the new password
+    login_res = client.post(
+        "/api/auth/login",
+        json={"identifier": student.username, "password": "NewSecretPassword123!"}
+    )
+    assert login_res.status_code == 200
+    assert "access_token" in login_res.json()
+
+
+def test_forgot_password_and_reset_flow():
+    """
+    Verifies the offline-friendly Forgot Password & Reset Password workflow.
+    """
+    user, _ = make_test_user("forgot_user", role="user")
+
+    # 1. Request forgot password with username
+    res_forgot = client.post(
+        "/api/auth/forgot-password",
+        json={"identifier": user.username}
+    )
+    assert res_forgot.status_code == 200
+    forgot_data = res_forgot.json()
+    assert "reset_token" in forgot_data
+    reset_token = forgot_data["reset_token"]
+
+    # 2. Reset password using the reset token
+    res_reset = client.post(
+        "/api/auth/reset-password",
+        json={
+            "identifier": user.username,
+            "new_password": "ResetPassword456!",
+            "reset_token": reset_token
+        }
+    )
+    assert res_reset.status_code == 200
+    assert "successfully reset" in res_reset.json()["message"]
+
+    # 3. Verify user can now log in with the new password
+    login_res = client.post(
+        "/api/auth/login",
+        json={"identifier": user.email, "password": "ResetPassword456!"}
+    )
+    assert login_res.status_code == 200
+    assert "access_token" in login_res.json()
+
+
+def test_profile_update_and_change_password():
+    """
+    Verifies user profile updates, changing own password, and stats retrieval.
+    """
+    user, token = make_test_user("profile_student", role="user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. Get user profile stats
+    res_stats = client.get("/api/auth/profile/stats", headers=headers)
+    assert res_stats.status_code == 200
+    stats = res_stats.json()
+    assert "total_attempts" in stats
+    assert "average_score" in stats
+
+    # 2. Update profile username & email
+    res_update = client.put(
+        "/api/auth/profile",
+        json={"username": "profile_student_renamed", "email": "renamed_student@example.com"},
+        headers=headers
+    )
+    assert res_update.status_code == 200
+    updated_user = res_update.json()
+    assert updated_user["username"] == "profile_student_renamed"
+    assert updated_user["email"] == "renamed_student@example.com"
+
+    # 3. Attempt to change password with wrong current password -> 400
+    res_wrong_pw = client.put(
+        "/api/auth/change-password",
+        json={"current_password": "WrongPassword!", "new_password": "FreshPassword789!"},
+        headers=headers
+    )
+    assert res_wrong_pw.status_code == 400
+    assert "Current password is incorrect" in res_wrong_pw.json()["detail"]
+
+    # 4. Change password with correct current password ("Password123!")
+    res_change_pw = client.put(
+        "/api/auth/change-password",
+        json={"current_password": "Password123!", "new_password": "FreshPassword789!"},
+        headers=headers
+    )
+    assert res_change_pw.status_code == 200
+    assert "Password changed successfully" in res_change_pw.json()["message"]
+
+    # 5. Verify login with the freshly changed password
+    login_res = client.post(
+        "/api/auth/login",
+        json={"identifier": "profile_student_renamed", "password": "FreshPassword789!"}
+    )
+    assert login_res.status_code == 200
+    assert "access_token" in login_res.json()
+

@@ -1,11 +1,24 @@
 from datetime import timedelta
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+import jwt
 
 from ..database.session import get_db
-from ..models.schema import User
-from ..schemas.dto import UserRegister, UserLogin, UserResponse, TokenResponse
-from ..core.security import hash_password, verify_password, create_access_token
+from ..models.schema import User, ExamAttempt
+from ..schemas.dto import (
+    UserRegister,
+    UserLogin,
+    UserResponse,
+    TokenResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    ChangePasswordRequest,
+    UpdateProfileRequest,
+    UserProfileStatsResponse,
+)
+from ..core.security import hash_password, verify_password, create_access_token, JWT_SECRET, JWT_ALGORITHM
 from ..core.deps import get_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
@@ -103,3 +116,186 @@ def logout_user(current_user: User = Depends(get_current_user)):
     Client-side session invalidation acknowledgment.
     """
     return {"status": "success", "message": "Successfully logged out."}
+
+
+@router.post("/forgot-password")
+def forgot_password_request(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Initiates password recovery by verifying user exists and providing a temporary reset token.
+    Works seamlessly offline without requiring paid third-party SMTP services.
+    """
+    ident = payload.identifier.strip().lower()
+    user = db.query(User).filter(
+        (User.username.ilike(ident)) | (User.email.ilike(ident))
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account found with that username or email address."
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account has been disabled. Please contact an administrator."
+        )
+
+    # Issue 15-minute reset token
+    reset_token = create_access_token(
+        {"sub": str(user.id), "scope": "password_reset", "username": user.username},
+        expires_delta=timedelta(minutes=15)
+    )
+
+    return {
+        "status": "success",
+        "message": f"Account verified for {user.username}. You may now reset your password.",
+        "reset_token": reset_token,
+        "username": user.username,
+        "email": user.email
+    }
+
+
+@router.post("/reset-password")
+def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Resets the user's password using either the reset token or verified identifier.
+    """
+    target_user: Optional[User] = None
+
+    if payload.reset_token:
+        try:
+            decoded = jwt.decode(payload.reset_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = int(decoded.get("sub"))
+            target_user = db.query(User).filter(User.id == user_id).first()
+        except Exception:
+            pass
+
+    if not target_user:
+        ident = payload.identifier.strip().lower()
+        target_user = db.query(User).filter(
+            (User.username.ilike(ident)) | (User.email.ilike(ident))
+        ).first()
+
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account not found or reset session expired."
+        )
+
+    new_pwd = payload.new_password.strip()
+    if len(new_pwd) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters long."
+        )
+
+    target_user.password_hash = hash_password(new_pwd)
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Password for {target_user.username} has been successfully reset. You can now sign in with your new password."
+    }
+
+
+@router.put("/change-password")
+def change_own_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Allows authenticated users to change their own password by verifying current password.
+    """
+    if not verify_password(payload.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect."
+        )
+
+    new_pwd = payload.new_password.strip()
+    if len(new_pwd) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 6 characters long."
+        )
+
+    current_user.password_hash = hash_password(new_pwd)
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": "Password changed successfully."
+    }
+
+
+@router.put("/profile", response_model=UserResponse)
+def update_own_profile(
+    payload: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Allows users to update their username or email address.
+    """
+    if payload.username is not None:
+        clean_user = payload.username.strip()
+        if clean_user != current_user.username:
+            existing = db.query(User).filter(
+                User.username.ilike(clean_user),
+                User.id != current_user.id
+            ).first()
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This username is already taken."
+                )
+            current_user.username = clean_user
+
+    if payload.email is not None:
+        clean_email = payload.email.strip().lower()
+        if clean_email != current_user.email:
+            existing = db.query(User).filter(
+                User.email.ilike(clean_email),
+                User.id != current_user.id
+            ).first()
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This email address is already in use by another account."
+                )
+            current_user.email = clean_email
+
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.get("/profile/stats", response_model=UserProfileStatsResponse)
+def get_user_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns exam participation statistics for the current user.
+    """
+    total = db.query(ExamAttempt).filter(ExamAttempt.user_id == current_user.id).count()
+    completed = db.query(ExamAttempt).filter(
+        ExamAttempt.user_id == current_user.id,
+        ExamAttempt.status.in_(["completed", "auto_submitted"])
+    ).count()
+
+    avg_score_res = db.query(func.avg(ExamAttempt.percentage)).filter(
+        ExamAttempt.user_id == current_user.id,
+        ExamAttempt.status.in_(["completed", "auto_submitted"])
+    ).scalar()
+
+    avg_score = round(float(avg_score_res), 1) if avg_score_res is not None else 0.0
+
+    return UserProfileStatsResponse(
+        total_attempts=total,
+        completed_attempts=completed,
+        average_score=avg_score
+    )
+

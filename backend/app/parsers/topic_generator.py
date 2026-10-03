@@ -2,10 +2,49 @@ import os
 import random
 import json
 import logging
+from pathlib import Path
 from typing import List, Optional, Dict, Any
+from dotenv import load_dotenv
 from ..schemas.dto import ParsedQuestion
 
 logger = logging.getLogger(__name__)
+
+# Search and load .env from all expected locations
+for _p in [
+    Path(__file__).resolve().parent.parent.parent / ".env",
+    Path(__file__).resolve().parent.parent.parent.parent / ".env",
+    Path.cwd() / "backend" / ".env",
+    Path.cwd() / ".env"
+]:
+    if _p.is_file():
+        load_dotenv(dotenv_path=_p, override=False)
+
+
+def _resolve_nvidia_api_key() -> Optional[str]:
+    """
+    Robustly resolves the NVIDIA API key from environment or local .env file.
+    """
+    env_key = os.getenv("NVIDIA_API_KEY")
+    if env_key and env_key.strip():
+        return env_key.strip()
+
+    for p in [
+        Path(__file__).resolve().parent.parent.parent / ".env",
+        Path(__file__).resolve().parent.parent.parent.parent / ".env",
+        Path.cwd() / "backend" / ".env",
+        Path.cwd() / ".env",
+    ]:
+        if p.is_file():
+            try:
+                for line in p.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("NVIDIA_API_KEY="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+            except Exception:
+                pass
+    return None
 
 # ==============================================================================
 # Comprehensive Domain Question Banks
@@ -461,12 +500,12 @@ class TopicQuestionGenerator:
         topic_clean = topic.strip()
         topic_lower = topic_clean.lower()
 
-        # 1. Check for optional external AI generation (NVIDIA NIM / Gemini / OpenAI)
-        nvidia_api_key = os.getenv("NVIDIA_API_KEY")
+        # 1. Check for external AI generation (NVIDIA NIM / Gemini / OpenAI)
+        nvidia_api_key = _resolve_nvidia_api_key()
         other_api_key = os.getenv("AI_GENERATION_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-        if nvidia_api_key or (other_api_key and other_api_key.startswith("nvapi-")):
-            key_to_use = nvidia_api_key or other_api_key
+        key_to_use = nvidia_api_key or (other_api_key if other_api_key and other_api_key.startswith("nvapi-") else None)
+        if key_to_use:
             try:
                 ai_questions = self._try_nvidia_generation(topic_clean, count, key_to_use)
                 if ai_questions and len(ai_questions) >= min(count, 2):
@@ -763,27 +802,28 @@ class TopicQuestionGenerator:
             norm = ["A"]
         return sorted(norm)
 
-    def _try_nvidia_generation(self, topic: str, count: int, api_key: str) -> Optional[List[ParsedQuestion]]:
+    def _fetch_single_nvidia_batch(self, topic: str, batch_count: int, api_key: str, batch_id: int = 1) -> List[ParsedQuestion]:
         """
-        Calls NVIDIA NIM chat completions API to generate real-time, topic-tailored questions.
+        Fetches a single batch of questions from NVIDIA NIM.
         """
         import httpx
         import re
 
         model = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
+        seed_note = f" (Sub-topic focus area #{batch_id})" if batch_id > 1 else ""
         system_prompt = (
             "You are an expert academic examiner. Create high-quality, strictly relevant exam questions.\n"
             "Return ONLY a valid JSON array of objects. Do not include markdown code fences or conversational text."
         )
         user_prompt = (
-            f"Generate exactly {count} examination questions on the topic: '{topic}'.\n"
+            f"Generate exactly {batch_count} examination questions on the topic: '{topic}'{seed_note}.\n"
             f"Requirements:\n"
             f"1. Every question must be 100% relevant to '{topic}'.\n"
-            f"2. Provide a realistic mix of single-answer (MCQ: exactly 1 correct answer) and "
+            f"2. Provide a realistic mix of single-answer (MCQ: 1 correct answer) and "
             f"multiple-answer (MSQ: 2 or 3 correct answers).\n"
             f"3. Exactly 4 options per question in 'options'.\n"
-            f"4. 'correct_answers' MUST be a list containing the option letters ('A', 'B', 'C', or 'D') for correct options.\n"
-            f"5. Provide a clear, educational explanation for each question.\n\n"
+            f"4. 'correct_answers' MUST be a list containing option letters ('A', 'B', 'C', or 'D') for correct options.\n"
+            f"5. 'explanation': exactly 1 concise educational sentence.\n\n"
             f"JSON structure example:\n"
             f"[\n"
             f"  {{\n"
@@ -791,7 +831,7 @@ class TopicQuestionGenerator:
             f"    \"options\": [\"Option A text\", \"Option B text\", \"Option C text\", \"Option D text\"],\n"
             f"    \"correct_answers\": [\"A\"],\n"
             f"    \"type\": \"MCQ\",\n"
-            f"    \"explanation\": \"Why it is correct\"\n"
+            f"    \"explanation\": \"Why it is correct in one concise sentence.\"\n"
             f"  }}\n"
             f"]"
         )
@@ -806,12 +846,12 @@ class TopicQuestionGenerator:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.2,
-            "max_tokens": min(4096, max(1024, count * 350))
+            "temperature": 0.25,
+            "max_tokens": min(2048, max(800, batch_count * 250))
         }
 
         try:
-            with httpx.Client(timeout=httpx.Timeout(35.0, connect=10.0)) as client:
+            with httpx.Client(timeout=httpx.Timeout(45.0, connect=12.0)) as client:
                 resp = client.post(
                     "https://integrate.api.nvidia.com/v1/chat/completions",
                     headers=headers,
@@ -847,15 +887,59 @@ class TopicQuestionGenerator:
                                     explanation=str(item.get("explanation", "")).strip(),
                                     type=item.get("type", q_type)
                                 ))
-                            if parsed:
-                                logger.info(f"NVIDIA AI successfully generated {len(parsed)} questions for topic '{topic}'")
-                                return parsed
+                            return parsed
                 else:
                     logger.warning(f"NVIDIA API responded with HTTP {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
-            logger.warning(f"NVIDIA API call failed: {e}")
+            logger.warning(f"NVIDIA batch fetch failed: {e}")
 
-        return None
+        return []
+
+    def _try_nvidia_generation(self, topic: str, count: int, api_key: str) -> Optional[List[ParsedQuestion]]:
+        """
+        Calls NVIDIA NIM chat completions API to generate real-time, topic-tailored questions.
+        Uses concurrent batching when count > 5 to guarantee swift response and prevent timeouts.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        if count <= 5:
+            res = self._fetch_single_nvidia_batch(topic, count, api_key, batch_id=1)
+            return res if res else None
+
+        half = count // 2
+        remainder = count - half
+        all_results: List[ParsedQuestion] = []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut1 = executor.submit(self._fetch_single_nvidia_batch, topic, half, api_key, 1)
+            fut2 = executor.submit(self._fetch_single_nvidia_batch, topic, remainder, api_key, 2)
+            try:
+                b1 = fut1.result()
+                all_results.extend(b1)
+            except Exception as e:
+                logger.warning(f"NVIDIA Batch 1 failed: {e}")
+            try:
+                b2 = fut2.result()
+                all_results.extend(b2)
+            except Exception as e:
+                logger.warning(f"NVIDIA Batch 2 failed: {e}")
+
+        # Deduplicate
+        unique_results: List[ParsedQuestion] = []
+        seen = set()
+        for q in all_results:
+            key = q.question.strip().lower()
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(q)
+
+        if unique_results:
+            logger.info(f"NVIDIA AI successfully generated {len(unique_results)} questions for topic '{topic}'")
+            return unique_results[:count]
+
+        # If parallel failed completely, try single conservative batch of up to 5 as final AI attempt
+        fallback_res = self._fetch_single_nvidia_batch(topic, min(count, 5), api_key, batch_id=3)
+        return fallback_res if fallback_res else None
 
     def _try_ai_generation(self, topic: str, count: int, api_key: str) -> Optional[List[ParsedQuestion]]:
         """

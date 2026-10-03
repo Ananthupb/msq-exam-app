@@ -461,12 +461,23 @@ class TopicQuestionGenerator:
         topic_clean = topic.strip()
         topic_lower = topic_clean.lower()
 
-        # 1. Check for optional external AI generation (e.g. Gemini / OpenAI)
-        ai_api_key = os.getenv("AI_GENERATION_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if ai_api_key:
+        # 1. Check for optional external AI generation (NVIDIA NIM / Gemini / OpenAI)
+        nvidia_api_key = os.getenv("NVIDIA_API_KEY")
+        other_api_key = os.getenv("AI_GENERATION_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+        if nvidia_api_key or (other_api_key and other_api_key.startswith("nvapi-")):
+            key_to_use = nvidia_api_key or other_api_key
             try:
-                ai_questions = self._try_ai_generation(topic_clean, count, ai_api_key)
-                if ai_questions and len(ai_questions) >= min(count, 3):
+                ai_questions = self._try_nvidia_generation(topic_clean, count, key_to_use)
+                if ai_questions and len(ai_questions) >= min(count, 2):
+                    return ai_questions[:count]
+            except Exception as e:
+                logger.warning(f"NVIDIA AI generation failed, falling back: {e}")
+
+        if other_api_key and not other_api_key.startswith("nvapi-"):
+            try:
+                ai_questions = self._try_ai_generation(topic_clean, count, other_api_key)
+                if ai_questions and len(ai_questions) >= min(count, 2):
                     return ai_questions[:count]
             except Exception as e:
                 logger.warning(f"AI generation failed, falling back to local engine: {e}")
@@ -712,6 +723,140 @@ class TopicQuestionGenerator:
         random.shuffle(pool)
         return pool[:count]
 
+    def _normalize_correct_answers(self, raw_answers: Any, options: List[str]) -> List[str]:
+        """
+        Normalizes answer representations (labels 'A', 'B', option strings, or indices)
+        into standardized uppercase letter labels ['A', 'B', ...].
+        """
+        labels = ["A", "B", "C", "D", "E", "F"]
+        norm: List[str] = []
+        if isinstance(raw_answers, str):
+            raw_list = [x.strip() for x in raw_answers.replace("and", ",").split(",") if x.strip()]
+        elif isinstance(raw_answers, list):
+            raw_list = raw_answers
+        else:
+            raw_list = [str(raw_answers)]
+
+        opt_stripped = [str(o).strip().lower() for o in options]
+        import re
+        for ans in raw_list:
+            ans_str = str(ans).strip()
+            ans_upper = ans_str.upper()
+            if ans_upper in labels[:len(options)]:
+                if ans_upper not in norm:
+                    norm.append(ans_upper)
+                continue
+            m = re.match(r'^(?:option\s+|choice\s+)?\(?([A-F])\)?[\.\:\s]?', ans_str, re.IGNORECASE)
+            if m and m.group(1).upper() in labels[:len(options)]:
+                let = m.group(1).upper()
+                if let not in norm:
+                    norm.append(let)
+                continue
+            ans_lower = ans_str.lower()
+            for idx, opt in enumerate(opt_stripped):
+                if ans_lower == opt or (len(ans_lower) > 3 and ans_lower in opt):
+                    letter = labels[idx]
+                    if letter not in norm:
+                        norm.append(letter)
+                    break
+        if not norm:
+            norm = ["A"]
+        return sorted(norm)
+
+    def _try_nvidia_generation(self, topic: str, count: int, api_key: str) -> Optional[List[ParsedQuestion]]:
+        """
+        Calls NVIDIA NIM chat completions API to generate real-time, topic-tailored questions.
+        """
+        import httpx
+        import re
+
+        model = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
+        system_prompt = (
+            "You are an expert academic examiner. Create high-quality, strictly relevant exam questions.\n"
+            "Return ONLY a valid JSON array of objects. Do not include markdown code fences or conversational text."
+        )
+        user_prompt = (
+            f"Generate exactly {count} examination questions on the topic: '{topic}'.\n"
+            f"Requirements:\n"
+            f"1. Every question must be 100% relevant to '{topic}'.\n"
+            f"2. Provide a realistic mix of single-answer (MCQ: exactly 1 correct answer) and "
+            f"multiple-answer (MSQ: 2 or 3 correct answers).\n"
+            f"3. Exactly 4 options per question in 'options'.\n"
+            f"4. 'correct_answers' MUST be a list containing the option letters ('A', 'B', 'C', or 'D') for correct options.\n"
+            f"5. Provide a clear, educational explanation for each question.\n\n"
+            f"JSON structure example:\n"
+            f"[\n"
+            f"  {{\n"
+            f"    \"question\": \"Question text?\",\n"
+            f"    \"options\": [\"Option A text\", \"Option B text\", \"Option C text\", \"Option D text\"],\n"
+            f"    \"correct_answers\": [\"A\"],\n"
+            f"    \"type\": \"MCQ\",\n"
+            f"    \"explanation\": \"Why it is correct\"\n"
+            f"  }}\n"
+            f"]"
+        )
+
+        headers = {
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json"
+        }
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": min(4096, max(1024, count * 350))
+        }
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(35.0, connect=10.0)) as client:
+                resp = client.post(
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers=headers,
+                    json=body
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "").strip()
+                        if content.startswith("```"):
+                            content = re.sub(r"^```(?:json)?\s*", "", content)
+                            content = re.sub(r"\s*```$", "", content)
+
+                        start_idx = content.find("[")
+                        end_idx = content.rfind("]")
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            content = content[start_idx:end_idx + 1]
+
+                        raw_list = json.loads(content)
+                        if isinstance(raw_list, list):
+                            parsed: List[ParsedQuestion] = []
+                            for item in raw_list:
+                                options = [str(o).strip() for o in item.get("options", []) if str(o).strip()]
+                                if len(options) < 2:
+                                    continue
+                                correct = self._normalize_correct_answers(item.get("correct_answers", ["A"]), options)
+                                q_type = "MCQ" if len(correct) == 1 else "MSQ"
+                                parsed.append(ParsedQuestion(
+                                    question=str(item.get("question", "")).strip(),
+                                    options=options,
+                                    correct_answers=correct,
+                                    explanation=str(item.get("explanation", "")).strip(),
+                                    type=item.get("type", q_type)
+                                ))
+                            if parsed:
+                                logger.info(f"NVIDIA AI successfully generated {len(parsed)} questions for topic '{topic}'")
+                                return parsed
+                else:
+                    logger.warning(f"NVIDIA API responded with HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"NVIDIA API call failed: {e}")
+
+        return None
+
     def _try_ai_generation(self, topic: str, count: int, api_key: str) -> Optional[List[ParsedQuestion]]:
         """
         Attempts to call an external AI API (e.g. Gemini) to generate real-time questions.
@@ -753,11 +898,14 @@ class TopicQuestionGenerator:
                         if isinstance(raw_list, list):
                             parsed: List[ParsedQuestion] = []
                             for item in raw_list:
-                                correct = item.get("correct_answers", ["A"])
+                                options = [str(o).strip() for o in item.get("options", []) if str(o).strip()]
+                                if len(options) < 2:
+                                    continue
+                                correct = self._normalize_correct_answers(item.get("correct_answers", ["A"]), options)
                                 q_type = "MCQ" if len(correct) == 1 else "MSQ"
                                 parsed.append(ParsedQuestion(
                                     question=item["question"],
-                                    options=item["options"],
+                                    options=options,
                                     correct_answers=correct,
                                     explanation=item.get("explanation", ""),
                                     type=item.get("type", q_type)
